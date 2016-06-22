@@ -1,4 +1,5 @@
 #include "pushDeformer.h"
+#include <maya/MFloatPointArray.h>
 MTypeId	PushDeformer::id(0x00124502);
 MObject PushDeformer::aAmount;
 MObject PushDeformer::aStressMap;
@@ -148,7 +149,7 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
 	CHECK_MSTATUS_AND_RETURN_IT(status);
 
   
-	fnMesh.getVertexNormals(false, m_taskData.normals, MSpace::kWorld);
+
 	itGeo.allPositions(m_taskData.points, MSpace::kWorld);
   //MGlobal::displayInfo( "test" );
   /*for (int i = 0; i < itGeo.count();  i++)
@@ -159,6 +160,7 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
 
   if(multiThreadingType == 1)
   {
+    fnMesh.getVertexNormals(false, m_taskData.normals, MSpace::kWorld);
     ThreadData* pThreadData = createThreadData( NUM_TASKS, &m_taskData );
     MThreadPool::newParallelRegion( createTasks, (void*)pThreadData );
     itGeo.setAllPositions(m_taskData.points);
@@ -169,61 +171,68 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
 
   else if(multiThreadingType == 2)
   {
-    tbb::parallel_for(size_t(0), size_t(itGeo.count()), [this](size_t i)
+    fnMesh.getVertexNormals(false, m_taskData.normals, MSpace::kWorld);
+    bool useStressV = m_taskData.useStressV == true && (m_taskData.stressV.length() > 0);
+    tbb::parallel_for(size_t(0), size_t(itGeo.count()), [this, useStressV](size_t i)
     {
 		  //const float w = weightValue(dataBlock, geomIndex, i);
       const float w = 1.0;
-		  if (m_taskData.useStressV == true && (m_taskData.stressV.length() > 0))
-		  {
-			  //deform
-			  m_taskData.points[i] += (MVector(m_taskData.normals[i]) * m_taskData.bulgeAmount * m_taskData.envelope * w * m_taskData.stressV[i]);
-		  }
-		  else
-		  {
-			  //deform
-        m_taskData.points[i] += m_taskData.normals[i] * m_taskData.bulgeAmount * m_taskData.envelope * w;
-		  }  
-  
+      float factor = m_taskData.bulgeAmount * m_taskData.envelope * w * (useStressV ? m_taskData.stressV[i] : 1.0);
+			//deform
+			m_taskData.points[i] += m_taskData.normals[i] * factor;
     });
   }
+  else if (multiThreadingType == 3)
+  {
+    const float w = 1.0;
+    #pragma omp parallel for 
+    for (int i = 0; i < itGeo.count(); i++)
+    {
+      //float w = weightValue(dataBlock, geomIndex, itGeo.index());
+      double stressFactor = (useStressV == 1 ? m_taskData.stressV[i] : 1.0);
+      double factor = bulgeAmount * m_taskData.envelope * w * stressFactor;
+      m_taskData.points[i].x += m_taskData.normals[i].x * factor;
+      m_taskData.points[i].y += m_taskData.normals[i].y * factor;
+      m_taskData.points[i].z += m_taskData.normals[i].z * factor;
+    }
+  }
+  //
+  else if (multiThreadingType == 4)
+  {
+    unsigned int start = 0;
+    unsigned int end = itGeo.count();
+    float w = 1.0;
+    //#pragma omp parallel for 
+    float ba = float(bulgeAmount);
+    float factor = float(bulgeAmount) * m_taskData.envelope * w;
+    MFloatPointArray pts;
+    fnMesh.getPoints(pts);
+    MFloatVectorArray norm;
+    fnMesh.getNormals(norm);
 
-  
-	//
-  else if(multiThreadingType == 3)
-  #pragma omp parallel for 
-
-  for (int i = 0; i < itGeo.count();  i++)
-	{
-		float w = weightValue(dataBlock, geomIndex, itGeo.index());
-		if (useStressV == true && (stressV.length() > 0))
-		{
-			//deform
-      m_taskData.points[i] += (MVector(m_taskData.normals[i]) * bulgeAmount * m_taskData.envelope * w * m_taskData.stressV[i]);
-			
-		}
-		else
-		{
-			//deform
-      m_taskData.points[i] += m_taskData.normals[i] * bulgeAmount * m_taskData.envelope * w;
-
-		}
-	}
+    for (unsigned int i = 0; i < end; i++)
+    {
+      //can't use pointers because:info C5002: loop not vectorized due to reason '1303'
+      //https://msdn.microsoft.com/en-us/library/jj658585.aspx
+      float ptCpy[4] = { pts[i].x,  pts[i].y,  pts[i].z, 0.0 };
+      float nCpy[4] = { norm[i].x, norm[i].y, norm[i].z, 0.0 };
+      for (int j = 0; j < 4; j++) {
+        ptCpy[j] += factor * nCpy[j];
+      }
+      //pts[i] = MFloatPoint(ptCpy);
+      m_taskData.points[i] = MFloatPoint(ptCpy);
+    }
+  }
   else
   {
+    const float w = 1.0;
     for (; !itGeo.isDone(); itGeo.next())
 	  {
-		  float w = weightValue(dataBlock, geomIndex, itGeo.index());
-		  if (useStressV == true && (stressV.length() > 0))
-		  {
-			  //deform
-        m_taskData.points[itGeo.index()] += (MVector(m_taskData.normals[itGeo.index()]) * bulgeAmount * m_taskData.envelope * w * m_taskData.stressV[itGeo.index()]);
-			
-		  }
-		  else
-		  {
-			  //deform
-        m_taskData.points[itGeo.index()] += m_taskData.normals[itGeo.index()] * bulgeAmount * m_taskData.envelope * w;
-		  }
+		  //float w = weightValue(dataBlock, geomIndex, itGeo.index());
+      
+      float factor = m_taskData.bulgeAmount * m_taskData.envelope * w * (useStressV ? m_taskData.stressV[itGeo.index()] : 1.0);
+      //deform
+      m_taskData.points[itGeo.index()] += m_taskData.normals[itGeo.index()] * factor;
 	  }
   }
 	itGeo.setAllPositions(m_taskData.points);
