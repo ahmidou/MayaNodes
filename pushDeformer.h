@@ -59,7 +59,7 @@ public:
 	static MStatus initialize();
 
 	static MTypeId id;
-
+  static MObject aDriverGeo;
 	static MObject aAmount;
 	static MObject aStressMap;
 	static MObject aUseStress;

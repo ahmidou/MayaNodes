@@ -1,6 +1,7 @@
 #include "pushDeformer.h"
 #include <maya/MFloatPointArray.h>
 MTypeId	PushDeformer::id(0x00124502);
+MObject PushDeformer::aDriverGeo;
 MObject PushDeformer::aAmount;
 MObject PushDeformer::aStressMap;
 MObject PushDeformer::aUseStress;
@@ -196,8 +197,8 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
       m_taskData.points[i].z += m_taskData.normals[i].z * factor;
     }
   }
-  //
   else if (multiThreadingType == 4)
+  // Vectorized
   {
     unsigned int start = 0;
     unsigned int end = itGeo.count();
@@ -223,9 +224,92 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
       m_taskData.points[i] = MFloatPoint(ptCpy);
     }
   }
+  else if (multiThreadingType == 5)
+  // Vectorized 2
+  {
+    unsigned int start = 0;
+    unsigned int end = itGeo.count();
+    float w = 1.0;
+    //#pragma omp parallel for 
+    float ba = float(bulgeAmount);
+    float factor = float(bulgeAmount) * m_taskData.envelope * w;
+    MFloatVectorArray norm;
+    fnMesh.getNormals(norm);
+    const float * pts = fnMesh.getRawPoints(0);
+    std::vector<float> vPts(end * 4);
+    std::vector<float> vNorms(end * 4);
+
+    for (unsigned int i = 0; i < end; i++)
+    {
+      vPts[i * 3] = pts[i * 3];
+      vPts[i * 3 + 1] = pts[i * 3 + 1];
+      vPts[i * 3 + 2] = pts[i * 3 + 2];
+
+      vNorms[i * 3] = norm[i].x;
+      vNorms[i * 3 + 1] = norm[i].y;
+      vNorms[i * 3 + 2] = norm[i].z;
+    }
+    unsigned int  vEnd = end * 3;
+    for (unsigned int i = 0; i < vEnd; i++)
+    {
+      vPts[i] += vNorms[i] * factor;
+    }
+  }
+  else if (multiThreadingType == 6)
+  {
+    unsigned int start = 0;
+    unsigned int end = itGeo.count();
+    float w = 1.0;
+    float ba = float(bulgeAmount);
+    float factor = float(bulgeAmount) * m_taskData.envelope * w;
+    MFloatVectorArray norm;
+    fnMesh.getNormals(norm);
+    const float * pts = fnMesh.getRawPoints(0);
+    float * vPts;
+    float * vNorms;
+    memcpy(vPts, pts, sizeof(float) * end * 3);
+    memcpy(vNorms, &norm[0], sizeof(float) * end * 3);
+
+    unsigned int  vEnd = end * 3;
+    for (unsigned int i = 0; i < vEnd; i++)
+    {
+      vPts[i] += vNorms[i] * factor;
+    }
+    //memcpy(vNorms, &vPts[0], sizeof(float) * end * 3);
+  }
+  else if (multiThreadingType == 7)
+  {
+    unsigned int start = 0;
+    unsigned int end = itGeo.count();
+    float w = 1.0;
+    float ba = float(bulgeAmount);
+    float factor = float(bulgeAmount) * m_taskData.envelope * w;
+    MFloatVectorArray norm;
+    fnMesh.getNormals(norm);
+    MFloatPointArray pts;
+    fnMesh.getPoints(pts);
+
+    float * a = &pts[0].x;
+    float * b = &norm[0].x;
+    int  vEnd = end;
+    int x = 0;
+    for (int i = 0; i < end; i++)
+    {
+      int k = i * 4;
+      int l = k + 4;
+      for (int j = k; j < l; j++)
+      {
+        if(k-i != 4)
+          a[j] += b[j-x] * factor;
+      }
+      x++;
+      m_taskData.points[i] = MFloatPoint(a[k], a[k+1], a[k+2], a[k+3]);
+    }
+  }
   else
   {
     const float w = 1.0;
+    fnMesh.getVertexNormals(false, m_taskData.normals, MSpace::kWorld);
     for (; !itGeo.isDone(); itGeo.next())
 	  {
 		  //float w = weightValue(dataBlock, geomIndex, itGeo.index());
