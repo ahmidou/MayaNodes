@@ -64,10 +64,12 @@ public:
 	static MObject aStressMap;
 	static MObject aUseStress;
   static MObject aMultiThreadingType;
+  
 
 private:
       TaskData m_taskData;
       ThreadData* threadData;
+      double m_MThreadPoolTime;
 };
 
 #endif // !BULGEDEFORMER_H

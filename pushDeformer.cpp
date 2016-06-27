@@ -1,5 +1,8 @@
 #include "pushDeformer.h"
 #include <maya/MFloatPointArray.h>
+#include <maya/MAnimControl.h>
+#include <chrono>
+#include <ctime>
 MTypeId	PushDeformer::id(0x00124502);
 MObject PushDeformer::aDriverGeo;
 MObject PushDeformer::aAmount;
@@ -83,7 +86,7 @@ MThreadRetVal PushDeformer::threadEvaluate( void *pParam )
     bool useStressV = pData->useStressV;
     float envelope = pData->envelope;
     int geomIndex = pData->geomIndex;
-	float w = 1.0;
+	  float w = 1.0;
     for ( unsigned int i = start; i < end; ++i )
     {
 		  //float w = weightValue(dataBlock, geomIndex, i);
@@ -151,12 +154,28 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
   }*/
   m_taskData.bulgeAmount = bulgeAmount;
 
+  double time = MAnimControl().currentTime().as(MTime::kFilm);
+  MGlobal::displayInfo(MString()+time);
+  if (time == 1)
+  {
+    m_MThreadPoolTime = 0;
+  }
+  auto startTime =std::chrono::steady_clock::now();
+  auto endTime = std::chrono::steady_clock::now();
   if(multiThreadingType == 1)
   {
     itGeo.allPositions(m_taskData.points, MSpace::kWorld);
     fnMesh.getVertexNormals(false, m_taskData.normals, MSpace::kWorld);
+
+    startTime = std::chrono::steady_clock::now();
     ThreadData* pThreadData = createThreadData( NUM_TASKS, &m_taskData );
     MThreadPool::newParallelRegion( createTasks, (void*)pThreadData );
+    endTime = std::chrono::steady_clock::now();
+    auto elapsed = endTime - startTime;
+    auto elapsedCount = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+    m_MThreadPoolTime += (double)elapsedCount / 1000000.0;
+
+    MGlobal::displayInfo(MString("compute time: ") + (MString() + (m_MThreadPoolTime/time)) + MString(" s"));
     itGeo.setAllPositions(m_taskData.points);
     delete [] pThreadData;
     return MS::kSuccess;
@@ -165,10 +184,13 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
 
   else if(multiThreadingType == 2)
   {
+    // TBB
     itGeo.allPositions(m_taskData.points, MSpace::kWorld);
     fnMesh.getVertexNormals(false, m_taskData.normals, MSpace::kWorld);
     bool useStressV = m_taskData.useStressV == true && (m_taskData.stressV.length() > 0);
-	const float w = 1.0;
+	  const float w = 1.0;
+
+    startTime = std::chrono::steady_clock::now();
     tbb::parallel_for(size_t(0), size_t(itGeo.count()), [this, useStressV, w](size_t i)
     {
 		//const float w = weightValue(dataBlock, geomIndex, i);
@@ -180,13 +202,17 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
 		m_taskData.points[i].y += m_taskData.normals[i].y * factor;
 		m_taskData.points[i].z += m_taskData.normals[i].z * factor;
     });
+    endTime = std::chrono::steady_clock::now();
   }
   else if (multiThreadingType == 3)
   {
+    // OMP Maya Array access
     const float w = 1.0;
     itGeo.allPositions(m_taskData.points, MSpace::kWorld);
     fnMesh.getVertexNormals(false, m_taskData.normals, MSpace::kWorld);
     bool useStressV = m_taskData.useStressV == true && (m_taskData.stressV.length() > 0);
+
+    startTime = std::chrono::steady_clock::now();
     #pragma omp parallel for 
     for (int i = 0; i < itGeo.count(); i++)
     {
@@ -197,6 +223,7 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
       m_taskData.points[i].y += m_taskData.normals[i].y * factor;
       m_taskData.points[i].z += m_taskData.normals[i].z * factor;
     }
+    endTime = std::chrono::steady_clock::now();
   }
   else if (multiThreadingType == 4)
   {
@@ -206,7 +233,6 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
     float ba = float(bulgeAmount);
     float factor = float(bulgeAmount) * m_taskData.envelope * w;
     MFloatVectorArray norm;
-    //fnMesh.getNormals(norm);
     fnMesh.getVertexNormals(false, norm, MSpace::kWorld);
     MFloatPointArray pts;
     fnMesh.getPoints(pts);
@@ -214,21 +240,24 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
     float * a = &pts[0].x;
     float * b = &norm[0].x;
     int  vEnd = end;
-    int x = 0;
-    //#pragma omp parallel for
+    int offset = 0;
+
+    startTime = std::chrono::steady_clock::now();
+    // outerloop can't be parallelized
     for (int i = 0; i < end; i++)
     {
-      int k = i * 4;
-      int l = k + 4;
+      int lBound = i * 4;
+      int uBound = lBound + 4;
       #pragma simd
-      for (int j = k; j < l; j++)
+      for (int j = lBound; j < uBound; j++)
       {
-        if(k-i != 4)
-          a[j] += b[j-x] * factor;
+        if(lBound -i != 4)
+          a[j] += b[j - offset] * factor;
       }
-      x++;
-      m_taskData.points[i] = MFloatPoint(a[k], a[k+1], a[k+2], 1.0);
+      offset++;
+      m_taskData.points[i] = MFloatPoint(a[lBound], a[lBound + 1], a[lBound + 2], 1.0);
     }
+    endTime = std::chrono::steady_clock::now();
   }
   else if (multiThreadingType == 5)
   {
@@ -238,12 +267,12 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
       float ba = float(bulgeAmount);
       float factor = float(bulgeAmount) * m_taskData.envelope * w;
       MFloatVectorArray norm;
-      //fnMesh.getNormals(norm);
       fnMesh.getVertexNormals(false, norm, MSpace::kWorld);
       const float * pts = fnMesh.getRawPoints(0);
       std::vector<float> a(end*3);
       float * b = &norm[0].x;
       int  vEnd = end;
+      startTime = std::chrono::steady_clock::now();
       #pragma omp parallel for
       for (int i = 0; i < end; i++)
       {
@@ -256,6 +285,7 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
           }
           m_taskData.points[i] = MFloatPoint(a[k], a[k + 1], a[k + 2], 1.0);
       }
+      endTime = std::chrono::steady_clock::now();
   }
   else if (multiThreadingType == 6)
   {
@@ -265,12 +295,13 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
       float ba = float(bulgeAmount);
       float factor = float(bulgeAmount) * m_taskData.envelope * w;
       MFloatVectorArray norm;
-      //fnMesh.getNormals(norm);
       fnMesh.getVertexNormals(false, norm, MSpace::kWorld);
       const float * pts = fnMesh.getRawPoints(0);
       std::vector<float> a(end * 3);
       float * b = &norm[0].x;
       int  vEnd = end*3;
+
+      startTime = std::chrono::steady_clock::now();
       #pragma omp parallel for
       //#pragma simd
       for (int i = 0; i < vEnd; i++)
@@ -283,24 +314,35 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
       {
           m_taskData.points[k] = MFloatVector(a[k * 3], a[k * 3 + 1], a[k * 3 + 2]);
       }
-
+      endTime = std::chrono::steady_clock::now();
   }
   else
   {
     const float w = 1.0;
     itGeo.allPositions(m_taskData.points, MSpace::kWorld);
     fnMesh.getVertexNormals(false, m_taskData.normals, MSpace::kWorld);
+
+    startTime = std::chrono::steady_clock::now();
     for (; !itGeo.isDone(); itGeo.next())
 	  {
-		  //float w = weightValue(dataBlock, geomIndex, itGeo.index());
-          double stressFactor = (useStressV == 1 ? m_taskData.stressV[itGeo.index()] : 1.0);
-          double factor = m_taskData.bulgeAmount * m_taskData.envelope * w * stressFactor;
-          //deform
-          m_taskData.points[itGeo.index()].x += m_taskData.normals[itGeo.index()].x * factor;
-          m_taskData.points[itGeo.index()].y += m_taskData.normals[itGeo.index()].y * factor;
-          m_taskData.points[itGeo.index()].z += m_taskData.normals[itGeo.index()].z * factor;
+        double stressFactor = (useStressV == 1 ? m_taskData.stressV[itGeo.index()] : 1.0);
+        double factor = m_taskData.bulgeAmount * m_taskData.envelope * w * stressFactor;
+        //deform
+        m_taskData.points[itGeo.index()].x += m_taskData.normals[itGeo.index()].x * factor;
+        m_taskData.points[itGeo.index()].y += m_taskData.normals[itGeo.index()].y * factor;
+        m_taskData.points[itGeo.index()].z += m_taskData.normals[itGeo.index()].z * factor;
 	  }
+    endTime = std::chrono::steady_clock::now();
   }
+
+
+
+  auto elapsed = endTime - startTime;
+  auto elapsedCount = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+  m_MThreadPoolTime += (double)elapsedCount / 1000000.0;
+
+  MGlobal::displayInfo(MString("compute time: ") + (MString() + (m_MThreadPoolTime / time)) + MString(" s"));
+
 	itGeo.setAllPositions(m_taskData.points);
 
 	return MS::kSuccess;
