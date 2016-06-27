@@ -83,23 +83,15 @@ MThreadRetVal PushDeformer::threadEvaluate( void *pParam )
     bool useStressV = pData->useStressV;
     float envelope = pData->envelope;
     int geomIndex = pData->geomIndex;
-
+	float w = 1.0;
     for ( unsigned int i = start; i < end; ++i )
     {
 		  //float w = weightValue(dataBlock, geomIndex, i);
-      float w = 1.0;
-		  if (useStressV == true && (stressV.length() > 0))
-		  {
-			  //deform
-			  points[i] += (MVector(normals[i]) * bulgeAmount * envelope * w * stressV[i]);
-			
-		  }
-		  else
-		  {
-			  //deform
-			  points[i] += normals[i] * bulgeAmount * envelope * w;
-
-		  }
+	  double stressFactor = (useStressV == 1 ? stressV[i] : 1.0);
+	  double factor = bulgeAmount * envelope * w * stressFactor;
+	  points[i].x += normals[i].x * factor;
+	  points[i].y += normals[i].y * factor;
+	  points[i].z += normals[i].z * factor;
     }
     return 0;
 }
@@ -133,7 +125,7 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
 		MObject stressMap = dataBlock.inputValue(aStressMap, &status).data();
 		CHECK_MSTATUS_AND_RETURN_IT(status);
 		MFnDoubleArrayData stressDataFn(stressMap);
-    m_taskData.stressV = stressDataFn.array();
+        m_taskData.stressV = stressDataFn.array();
 	}
 
 	//retrieve the handle to the output array attribute
@@ -151,7 +143,7 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
 
   
 
-	itGeo.allPositions(m_taskData.points, MSpace::kWorld);
+	
   //MGlobal::displayInfo( "test" );
   /*for (int i = 0; i < itGeo.count();  i++)
 	{
@@ -161,6 +153,7 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
 
   if(multiThreadingType == 1)
   {
+    itGeo.allPositions(m_taskData.points, MSpace::kWorld);
     fnMesh.getVertexNormals(false, m_taskData.normals, MSpace::kWorld);
     ThreadData* pThreadData = createThreadData( NUM_TASKS, &m_taskData );
     MThreadPool::newParallelRegion( createTasks, (void*)pThreadData );
@@ -172,20 +165,28 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
 
   else if(multiThreadingType == 2)
   {
+    itGeo.allPositions(m_taskData.points, MSpace::kWorld);
     fnMesh.getVertexNormals(false, m_taskData.normals, MSpace::kWorld);
     bool useStressV = m_taskData.useStressV == true && (m_taskData.stressV.length() > 0);
-    tbb::parallel_for(size_t(0), size_t(itGeo.count()), [this, useStressV](size_t i)
+	const float w = 1.0;
+    tbb::parallel_for(size_t(0), size_t(itGeo.count()), [this, useStressV, w](size_t i)
     {
-		  //const float w = weightValue(dataBlock, geomIndex, i);
-      const float w = 1.0;
-      float factor = m_taskData.bulgeAmount * m_taskData.envelope * w * (useStressV ? m_taskData.stressV[i] : 1.0);
-			//deform
-			m_taskData.points[i] += m_taskData.normals[i] * factor;
+		//const float w = weightValue(dataBlock, geomIndex, i);
+		
+		double stressFactor = (useStressV == 1 ? m_taskData.stressV[i] : 1.0);
+		double factor = m_taskData.bulgeAmount * m_taskData.envelope * w * stressFactor;
+		//deform
+		m_taskData.points[i].x += m_taskData.normals[i].x * factor;
+		m_taskData.points[i].y += m_taskData.normals[i].y * factor;
+		m_taskData.points[i].z += m_taskData.normals[i].z * factor;
     });
   }
   else if (multiThreadingType == 3)
   {
     const float w = 1.0;
+    itGeo.allPositions(m_taskData.points, MSpace::kWorld);
+    fnMesh.getVertexNormals(false, m_taskData.normals, MSpace::kWorld);
+    bool useStressV = m_taskData.useStressV == true && (m_taskData.stressV.length() > 0);
     #pragma omp parallel for 
     for (int i = 0; i < itGeo.count(); i++)
     {
@@ -198,64 +199,6 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
     }
   }
   else if (multiThreadingType == 4)
-  // Vectorized
-  {
-    unsigned int start = 0;
-    unsigned int end = itGeo.count();
-    float w = 1.0;
-    //#pragma omp parallel for 
-    float ba = float(bulgeAmount);
-    float factor = float(bulgeAmount) * m_taskData.envelope * w;
-    MFloatPointArray pts;
-    fnMesh.getPoints(pts);
-    MFloatVectorArray norm;
-    fnMesh.getNormals(norm);
-
-    for (unsigned int i = 0; i < end; i++)
-    {
-      //can't use pointers because:info C5002: loop not vectorized due to reason '1303'
-      //https://msdn.microsoft.com/en-us/library/jj658585.aspx
-      float ptCpy[4] = { pts[i].x,  pts[i].y,  pts[i].z, 0.0 };
-      float nCpy[4] = { norm[i].x, norm[i].y, norm[i].z, 0.0 };
-      for (int j = 0; j < 4; j++) {
-        ptCpy[j] += factor * nCpy[j];
-      }
-      //pts[i] = MFloatPoint(ptCpy);
-      m_taskData.points[i] = MFloatPoint(ptCpy);
-    }
-  }
-  else if (multiThreadingType == 5)
-  // Vectorized 2
-  {
-    unsigned int start = 0;
-    unsigned int end = itGeo.count();
-    float w = 1.0;
-    //#pragma omp parallel for 
-    float ba = float(bulgeAmount);
-    float factor = float(bulgeAmount) * m_taskData.envelope * w;
-    MFloatVectorArray norm;
-    fnMesh.getNormals(norm);
-    const float * pts = fnMesh.getRawPoints(0);
-    std::vector<float> vPts(end * 4);
-    std::vector<float> vNorms(end * 4);
-
-    for (unsigned int i = 0; i < end; i++)
-    {
-      vPts[i * 3] = pts[i * 3];
-      vPts[i * 3 + 1] = pts[i * 3 + 1];
-      vPts[i * 3 + 2] = pts[i * 3 + 2];
-
-      vNorms[i * 3] = norm[i].x;
-      vNorms[i * 3 + 1] = norm[i].y;
-      vNorms[i * 3 + 2] = norm[i].z;
-    }
-    unsigned int  vEnd = end * 3;
-    for (unsigned int i = 0; i < vEnd; i++)
-    {
-      vPts[i] += vNorms[i] * factor;
-    }
-  }
-  else if (multiThreadingType == 6)
   {
     unsigned int start = 0;
     unsigned int end = itGeo.count();
@@ -263,29 +206,8 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
     float ba = float(bulgeAmount);
     float factor = float(bulgeAmount) * m_taskData.envelope * w;
     MFloatVectorArray norm;
-    fnMesh.getNormals(norm);
-    const float * pts = fnMesh.getRawPoints(0);
-    float * vPts;
-    float * vNorms;
-    memcpy(vPts, pts, sizeof(float) * end * 3);
-    memcpy(vNorms, &norm[0], sizeof(float) * end * 3);
-
-    unsigned int  vEnd = end * 3;
-    for (unsigned int i = 0; i < vEnd; i++)
-    {
-      vPts[i] += vNorms[i] * factor;
-    }
-    //memcpy(vNorms, &vPts[0], sizeof(float) * end * 3);
-  }
-  else if (multiThreadingType == 7)
-  {
-    unsigned int start = 0;
-    unsigned int end = itGeo.count();
-    float w = 1.0;
-    float ba = float(bulgeAmount);
-    float factor = float(bulgeAmount) * m_taskData.envelope * w;
-    MFloatVectorArray norm;
-    fnMesh.getNormals(norm);
+    //fnMesh.getNormals(norm);
+    fnMesh.getVertexNormals(false, norm, MSpace::kWorld);
     MFloatPointArray pts;
     fnMesh.getPoints(pts);
 
@@ -293,30 +215,90 @@ MStatus PushDeformer::deform(MDataBlock& dataBlock,
     float * b = &norm[0].x;
     int  vEnd = end;
     int x = 0;
+    //#pragma omp parallel for
     for (int i = 0; i < end; i++)
     {
       int k = i * 4;
       int l = k + 4;
+      #pragma simd
       for (int j = k; j < l; j++)
       {
         if(k-i != 4)
           a[j] += b[j-x] * factor;
       }
       x++;
-      m_taskData.points[i] = MFloatPoint(a[k], a[k+1], a[k+2], a[k+3]);
+      m_taskData.points[i] = MFloatPoint(a[k], a[k+1], a[k+2], 1.0);
     }
+  }
+  else if (multiThreadingType == 5)
+  {
+      unsigned int start = 0;
+      unsigned int end = itGeo.count();
+      float w = 1.0;
+      float ba = float(bulgeAmount);
+      float factor = float(bulgeAmount) * m_taskData.envelope * w;
+      MFloatVectorArray norm;
+      //fnMesh.getNormals(norm);
+      fnMesh.getVertexNormals(false, norm, MSpace::kWorld);
+      const float * pts = fnMesh.getRawPoints(0);
+      std::vector<float> a(end*3);
+      float * b = &norm[0].x;
+      int  vEnd = end;
+      #pragma omp parallel for
+      for (int i = 0; i < end; i++)
+      {
+          int k = i * 3;
+          int l = k + 3;
+          #pragma simd
+          for (int j = k; j < l; j++)
+          {
+                  a[j] = pts[j] + (b[j] * factor);
+          }
+          m_taskData.points[i] = MFloatPoint(a[k], a[k + 1], a[k + 2], 1.0);
+      }
+  }
+  else if (multiThreadingType == 6)
+  {
+      unsigned int start = 0;
+      unsigned int end = itGeo.count();
+      float w = 1.0;
+      float ba = float(bulgeAmount);
+      float factor = float(bulgeAmount) * m_taskData.envelope * w;
+      MFloatVectorArray norm;
+      //fnMesh.getNormals(norm);
+      fnMesh.getVertexNormals(false, norm, MSpace::kWorld);
+      const float * pts = fnMesh.getRawPoints(0);
+      std::vector<float> a(end * 3);
+      float * b = &norm[0].x;
+      int  vEnd = end*3;
+      #pragma omp parallel for
+      //#pragma simd
+      for (int i = 0; i < vEnd; i++)
+      {
+         a[i] = pts[i] + (b[i] * factor);
+      }
+      #pragma omp parallel for
+
+      for (int k = 0; k < end; k++)
+      {
+          m_taskData.points[k] = MFloatVector(a[k * 3], a[k * 3 + 1], a[k * 3 + 2]);
+      }
+
   }
   else
   {
     const float w = 1.0;
+    itGeo.allPositions(m_taskData.points, MSpace::kWorld);
     fnMesh.getVertexNormals(false, m_taskData.normals, MSpace::kWorld);
     for (; !itGeo.isDone(); itGeo.next())
 	  {
 		  //float w = weightValue(dataBlock, geomIndex, itGeo.index());
-      
-      float factor = m_taskData.bulgeAmount * m_taskData.envelope * w * (useStressV ? m_taskData.stressV[itGeo.index()] : 1.0);
-      //deform
-      m_taskData.points[itGeo.index()] += m_taskData.normals[itGeo.index()] * factor;
+          double stressFactor = (useStressV == 1 ? m_taskData.stressV[itGeo.index()] : 1.0);
+          double factor = m_taskData.bulgeAmount * m_taskData.envelope * w * stressFactor;
+          //deform
+          m_taskData.points[itGeo.index()].x += m_taskData.normals[itGeo.index()].x * factor;
+          m_taskData.points[itGeo.index()].y += m_taskData.normals[itGeo.index()].y * factor;
+          m_taskData.points[itGeo.index()].z += m_taskData.normals[itGeo.index()].z * factor;
 	  }
   }
 	itGeo.setAllPositions(m_taskData.points);
